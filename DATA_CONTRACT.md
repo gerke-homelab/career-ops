@@ -20,6 +20,7 @@ These files contain your personal data, customizations, and work product. Update
 | `reports/*` | Your evaluation reports |
 | `output/*` | Your generated PDFs |
 | `jds/*` | Your saved job descriptions |
+| `personal/*` | Uncontracted freeform personal space (notes, scratch scripts) — no schema enforced, nothing reads it programmatically; gitignored except its README |
 
 ## System Layer (safe to auto-update)
 
