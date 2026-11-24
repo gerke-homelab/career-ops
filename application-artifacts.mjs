@@ -11,10 +11,11 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { parseArgs } from 'util';
-import { fileURLToPath } from 'url';
 import { validateFlags } from './lib/cli-flags.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
-const DEFAULT_OUTPUT_ROOT = resolve('output');
+const DEFAULT_OUTPUT_ROOT = join(getCareerOpsRoot(), 'output');
 const DECISIONS = new Set(['reuse', 'reuse-with-edits', 'regenerate']);
 
 /** Convert a user-facing label into a safe, readable path segment. */
@@ -154,7 +155,7 @@ async function main() {
   console.log(JSON.stringify(paths, null, 2));
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (isMainModule(import.meta.url)) {
   main().catch((error) => {
     console.error(`application-artifacts: ${error.message}`);
     process.exitCode = 1;
