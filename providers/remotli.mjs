@@ -14,7 +14,8 @@
 // Note the doubly-nested shape: each element of the top-level `jobs` array is a
 // join row `{ jobs, companies }`, and the posting itself lives under `.jobs`.
 //
-// Wire in as a tracked_companies entry:
+// Configure via a `job_boards` (or `tracked_companies`) entry with
+// `provider: remotli`:
 //
 //   - name: Remotli (Swiss remote board)
 //     provider: remotli
@@ -106,7 +107,7 @@ function toEpochMs(value) {
 // and the compensating pass is gone.
 function htmlToText(html) {
   if (typeof html !== 'string' || !html) return '';
-  return decodeEntities(html.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  return decodeEntities(html.replace(/<[^>]*(>?)/g, (tag, close) => (close ? ' ' : tag))).replace(/\s+/g, ' ').trim();
 }
 
 /**

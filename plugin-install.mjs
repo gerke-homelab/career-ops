@@ -17,6 +17,8 @@ import path from 'node:path';
 import { validateManifest } from './plugins/_engine.mjs';
 import { hashPluginTree } from './plugins/_lock.mjs';
 import { auditPlugin } from './plugin-audit.mjs';
+import { validateFlags } from './lib/cli-flags.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
 const GITHUB_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(?:\.git)?$/;
 const NAME_RE = /^career-ops-plugin-([a-z0-9][a-z0-9-]*)$/;
@@ -67,8 +69,9 @@ export function validateInstall(dir, expectId) {
   const manifest = validateManifest(parsed, dir, expectId);
   if (!manifest) return { ok: false, problems: ['manifest failed validation (see ⚠️ above)'], manifest: null, dir };
   const audit = auditPlugin(dir);
-  if (!audit.ok) return { ok: false, problems: audit.findings.map(f => `${f.file}: ${f.issue}`), manifest, dir };
-  return { ok: true, problems: [], manifest, dir };
+  const warnings = audit.warnings.map(w => `${w.file}:${w.line}: ${w.issue}`);
+  if (!audit.ok) return { ok: false, problems: audit.findings.map(f => `${f.file}: ${f.issue}`), warnings, manifest, dir };
+  return { ok: true, problems: [], warnings, manifest, dir };
 }
 
 /**
@@ -92,16 +95,18 @@ export function installFromRepo(root, { url, sha }) {
   cpSync(result.dir, dest, { recursive: true });
   rmSync(result.dir, { recursive: true, force: true });
   const tree = hashPluginTree(dest);
-  return { id, manifest: { ...result.manifest, dir: dest }, integrity: tree.integrity, files: tree.files, repo: safeUrl, sha };
+  return { id, manifest: { ...result.manifest, dir: dest }, integrity: tree.integrity, files: tree.files, repo: safeUrl, sha, warnings: result.warnings };
 }
 
 /**
  * Clone + statically validate a registry entry WITHOUT installing it (used by
  * the registry-validate CI). Executes NO plugin code — manifest is parsed, the
- * audit is static. Returns problems (empty = clean).
+ * audit is static. Returns problems (empty = clean); audit warnings, which do
+ * not make an entry invalid, go to `onWarning`.
+ * @param {(warning: string) => void} [onWarning]
  * @returns {string[]}
  */
-export function auditRegistryEntry(url, sha, expectId) {
+export function auditRegistryEntry(url, sha, expectId, onWarning = () => {}) {
   let parsed;
   try { parsed = parseRepoArg(url); } catch (e) { return [e.message]; }
   if (expectId && parsed.id !== expectId) return [`repo "${url}" → id "${parsed.id}" but registry id is "${expectId}"`];
@@ -111,6 +116,7 @@ export function auditRegistryEntry(url, sha, expectId) {
   try { result = validateInstall(dir, parsed.id); }
   catch (e) { rmSync(dir, { recursive: true, force: true }); return [e.message]; }
   try { rmSync(result.dir || dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  for (const w of result.warnings || []) onWarning(w);
   return result.ok ? [] : result.problems;
 }
 
@@ -123,6 +129,11 @@ export function scaffoldNew(root, name) {
   if (existsSync(dest)) throw new Error(`plugins.local/${name} already exists`);
   mkdirSync(path.join(root, 'plugins.local'), { recursive: true });
   cpSync(tpl, dest, { recursive: true });
+  // The template ships its skill as skill.md.template so skill catalogs that
+  // index any SKILL.md with frontmatter do not list the placeholder as a real
+  // skill; the scaffolded plugin gets the skill.md its manifest points at.
+  const skillTpl = path.join(dest, 'skill.md.template');
+  if (existsSync(skillTpl)) renameSync(skillTpl, path.join(dest, 'skill.md'));
   // Substitute {{NAME}} placeholders in shipped text files.
   const sub = (p) => { if (existsSync(p)) writeFileSync(p, readFileSync(p, 'utf8').replaceAll('{{NAME}}', name), 'utf8'); };
   for (const f of readdirSync(dest, { withFileTypes: true })) {
@@ -130,4 +141,57 @@ export function scaffoldNew(root, name) {
   }
   if (existsSync(path.join(dest, 'test'))) for (const f of readdirSync(path.join(dest, 'test'))) sub(path.join(dest, 'test', f));
   return dest;
+}
+
+// ── CLI flags + help ────────────────────────────────────────────────
+//
+// This file is a library first: plugins.mjs owns the user-facing `new`/`add`
+// commands and calls the exports above. But docs/SCRIPTS.md lists `node
+// plugin-install.mjs` as a runnable command, so it is reachable directly — and
+// every direct invocation printed nothing and exited 0, `--help` and a typo'd
+// flag included. That is the silent-success shape lib/cli-flags.mjs exists to
+// end (#2775): nothing told you the install/scaffold commands live elsewhere.
+//
+// KNOWN_FLAGS is exactly --help/-h because that is every flag this file parses.
+// --sha and --confirm are plugins.mjs's flags, not this script's, so they are
+// pointed at rather than claimed here.
+
+const KNOWN_FLAGS = ['--help', '-h'];
+
+const USAGE = `Usage:
+  node plugin-install.mjs --help|-h   # print this usage block and exit
+
+plugin-install.mjs takes no flags or arguments of its own — it is the
+clone/scaffold/validate engine behind plugins.mjs, which owns the CLI:
+
+  node plugins.mjs new <name>
+      # scaffold plugins.local/<name> from plugins/_template/
+
+  node plugins.mjs add <name|owner/repo> [--sha <commit>] [--confirm]
+      # clone a pinned commit into plugins.local/<id>, validate it, and print
+      # its capability card (--confirm also enables it)
+
+Install constraints enforced here: the repo must be named
+career-ops-plugin-<name>, live at https://github.com/<owner>/<repo>, and be
+pinned to a 40-hex commit SHA — a registry entry supplies the SHA, anything
+else requires --sha. See docs/PLUGINS.md.`;
+
+if (isMainModule(import.meta.url)) {
+  const args = process.argv.slice(2);
+
+  // Unrecognized flags exit 1 naming the flag; --help/-h print USAGE and exit 0.
+  validateFlags(args, KNOWN_FLAGS, USAGE);
+
+  // Anything left is a non-flag operand (a repo, a plugin name) aimed at a
+  // command this file does not have. Exiting 0 in silence is how you end up
+  // believing a plugin was installed, so say where the command lives instead.
+  if (args.length > 0) {
+    console.error(`Error: plugin-install.mjs takes no arguments (got: ${args.join(' ')}). Its commands live on plugins.mjs.`);
+    console.error(USAGE);
+    process.exit(1);
+  }
+
+  // Bare `node plugin-install.mjs`, the form docs/SCRIPTS.md documents: there is
+  // no work to do here, so print where the work is rather than nothing at all.
+  console.log(USAGE);
 }
